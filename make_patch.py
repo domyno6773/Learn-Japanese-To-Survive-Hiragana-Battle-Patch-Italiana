@@ -49,10 +49,46 @@ def delta(before, after):
         output += struct.pack('<BI',1,len(after)-literal) + after[literal:]
     return output
 
+def apply_delta(before, commands, size):
+    """Reconstruct a previous release to build its upgrade delta."""
+    result = bytearray()
+    cursor = 0
+    while cursor < len(commands):
+        opcode = commands[cursor]
+        cursor += 1
+        if opcode == 0:
+            start, count = struct.unpack_from('<II', commands, cursor)
+            cursor += 8
+            assert start + count <= len(before)
+            result.extend(before[start:start+count])
+        elif opcode == 1:
+            count, = struct.unpack_from('<I', commands, cursor)
+            cursor += 4
+            assert cursor + count <= len(commands)
+            result.extend(commands[cursor:cursor+count])
+            cursor += count
+        else:
+            raise ValueError('Invalid delta opcode')
+    assert len(result) == size
+    return bytes(result)
+
+
+def prior_release(path, originals):
+    with ZipFile(path) as archive:
+        for line in archive.read('manifest.tsv').decode('utf-8').splitlines():
+            name, expected, target, size, item, *_ = line.split('\t')
+            before = originals.get(name)
+            assert ('-' if before is None else digest(before)) == expected, name
+            after = apply_delta(before or b'', archive.read(item), int(size))
+            assert digest(after) == target, name
+            yield name, after
+
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('game',type=Path)
     parser.add_argument('backups',type=Path,nargs='+')
+    parser.add_argument('--upgrade-from',type=Path,action='append',default=[])
     args=parser.parse_args()
     originals={}
     for backup in args.backups:
@@ -60,6 +96,7 @@ def main():
             for name in archive.namelist():
                 originals.setdefault(name,archive.read(name))
     plugin='www/js/plugins/HiraganaItaliano.js'
+    previous=[dict(prior_release(p,originals)) for p in args.upgrade_from]
     lines=[]
     with ZipFile(Path(__file__).with_name('patch.zip'),'w',ZIP_DEFLATED,compresslevel=9) as archive:
         for name,before in sorted([*originals.items(),(plugin,None)]):
@@ -69,8 +106,22 @@ def main():
                 continue
             item=str(len(lines))
             archive.writestr(item,delta(before or b'',after))
-            lines.append('\t'.join([name,digest(before) if before is not None else '-',
-                                    digest(after),str(len(after)),item]))
+            original_hash=digest(before) if before is not None else '-'
+            target_hash=digest(after)
+            record=[name,original_hash,target_hash,str(len(after)),item]
+            seen={original_hash,target_hash}
+            for release in previous:
+                if name not in release:
+                    continue
+                prior=release[name]
+                prior_hash=digest(prior)
+                if prior_hash in seen:
+                    continue
+                seen.add(prior_hash)
+                variant=f'{item}-upgrade-{len(seen)}'
+                archive.writestr(variant,delta(prior,after))
+                record.extend((prior_hash,variant))
+            lines.append('\t'.join(record))
         archive.writestr('manifest.tsv','\n'.join(lines)+'\n')
     print(f'{len(lines)} file nella patch.')
 if __name__=='__main__':

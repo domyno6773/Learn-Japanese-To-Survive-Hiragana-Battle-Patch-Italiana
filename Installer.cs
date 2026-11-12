@@ -15,7 +15,7 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("Hiragana Battle - Patch italiana")]
 [assembly: AssemblyProduct("Hiragana Battle - Patch italiana")]
-[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
 
 internal static class SteamGame
 {
@@ -97,6 +97,7 @@ internal static class Patch
         internal string RelativePath;
         internal string Target;
         internal byte[] Before;
+        internal bool IsOriginal;
         internal byte[] After;
     }
 
@@ -159,14 +160,21 @@ internal static class Patch
                 string hash = Hash(before);
                 if (hash == entry[2])
                     continue;
-                if (hash != entry[1])
+                bool isOriginal = hash == entry[1];
+                string deltaName = isOriginal ? entry[4] : null;
+                for (int index = 5; deltaName == null && index + 1 < entry.Length; index += 2)
+                {
+                    if (entry[index] == hash)
+                        deltaName = entry[index + 1];
+                }
+                if (deltaName == null)
                     throw new InvalidDataException("Versione del file non riconosciuta:\n" + relative +
-                        "\n\nLa patch richiede i file originali della versione Steam supportata. " +
+                        "\n\nServe la build Steam supportata o una versione precedente compatibile della patch. " +
                         "Puoi ripristinarli con «Verifica integrità dei file di gioco» in Steam.");
-                byte[] after = ApplyDelta(archive.GetEntry(entry[4]).Open(), before, Int32.Parse(entry[3]));
+                byte[] after = ApplyDelta(archive.GetEntry(deltaName).Open(), before, Int32.Parse(entry[3]));
                 if (Hash(after) != entry[2])
                     throw new InvalidDataException("Il controllo di integrità della patch è fallito.");
-                changes.Add(new Change { RelativePath = relative, Target = target, Before = before, After = after });
+                changes.Add(new Change { RelativePath = relative, Target = target, Before = before, IsOriginal = isOriginal, After = after });
             }
         }
         return changes;
@@ -174,7 +182,7 @@ internal static class Patch
 
     private static void SaveOriginal(string backup, Change change)
     {
-        if (change.Before == null)
+        if (!change.IsOriginal || change.Before == null)
             return;
         string path = Path.Combine(backup, change.RelativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(path));
